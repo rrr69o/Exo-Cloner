@@ -1,233 +1,233 @@
-import Discord, { TextChannel } from "discord.js-selfbot-v13";
-import readline from "readline";
-import dotenv from "dotenv"; 
-import gradient from "gradient-string";
-import { choiceinit, menutext, creatorname, setlang, t } from "./utils/func";
+import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, CommandInteraction, EmbedBuilder } from 'discord.js';
+import axios from 'axios';
+import dotenv from 'dotenv';
 
 dotenv.config();
 
-export const client = new Discord.Client({
-  checkUpdate: false,
-  partials: [],
-});
+interface HypixelPlayer {
+  displayname: string;
+  uuid: string;
+  stats?: {
+    SkyBlock?: {
+      profiles: Record<string, any>;
+    };
+    Duels?: any;
+    BedWars?: any;
+    SkyWars?: any;
+  };
+}
 
-export const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+interface HypixelApiResponse {
+  success: boolean;
+  player: HypixelPlayer | null;
+}
 
-const token = process.env.TOKEN;
+class HypixelDiscordBot {
+  private client: Client;
+  private rest: REST;
+  private hypixelApiKey: string;
 
-client.on("ready", async () => {
-  const localeSetting: string = client.settings.locale;
-  if (localeSetting === "HINDI") {
-    setlang('hi');
-  } else {
-    setlang('en');
+  constructor() {
+    this.client = new Client({
+      intents: [GatewayIntentBits.Guilds]
+    });
+
+    this.rest = new REST().setToken(process.env.DISCORD_BOT_TOKEN!);
+    this.hypixelApiKey = process.env.HYPIXEL_API_KEY!;
+
+    this.setupEvents();
+    this.registerCommands();
   }
-  const guild = client.guilds.cache.get('1166303696263585852');
-  if (guild) {
-    const channel = guild.channels.cache.get('1196344426616852530');
 
-    if (channel) {
-      (channel as TextChannel).send({ content: 'Hello world' }).catch(error => {});
-    } else {
-      console.log('...');
-    }
+  private setupEvents(): void {
+    this.client.once('ready', () => {
+      console.log(`✅ Bot logged in as ${this.client.user?.tag}!`);
+    });
 
-  } else {
-    console.log(gradient(["red", "orange"])(t('nosvr')));
-    process.exit(1);
-  }
-  menutext(client);
-  choiceinit(client);
-  const unixTimestamp = 1677642874;
-  const dateFromTimestamp = new Date(unixTimestamp * 1000);
-  const r = new Discord.RichPresence()
-    .setApplicationId('1119851163530051685')
-    .setType('PLAYING')
-    .setURL('https://discord.gg/AppjJFudZq')
-    .setName('CodeX On Top')
-    .setState('Running...')
-    .setDetails('The best server about bots and coding')
-    .setAssetsLargeText('CodeX On Top')
-    .setAssetsSmallText('Join')
-    .setStartTimestamp(dateFromTimestamp)
-    .addButton('Join', 'https://discord.gg/AppjJFudZq');
-  client.user.setActivity(r);
-  client.user.setPresence({ status: "idle" });
-});
+    this.client.on('interactionCreate', async (interaction) => {
+      if (!interaction.isChatInputCommand()) return;
 
-client.once("finish", (_event) => {
-  client.user.setActivity();
-});
-
-if (!token) {
-  console.clear();
-  creatorname();
-  rl.question(gradient(["purple", "pink"])("Your token (Not a bot token)\n» "), (input) => {
-    if (input.trim() === '') {
-      console.log(gradient(["red", "orange"])("Token was returned as empty"));
-      process.kill(1);
-    } else {
-      client.login(input)
-        .catch((error) => {
-          if (error.message === 'An invalid token was provided.') {
-            console.clear();
-            console.log(gradient(["red", "orange"])("Invalid token"));
-          } else {
-            console.clear();
-            console.error(gradient(["red", "orange"])(`Error logging in: ${error.message}`));
-          }
-        });
-    }
-  });
-} else {
-  console.clear();
-  client.login(token)
-    .catch((error) => {
-      console.clear();
-      if (error.message === 'An invalid token was provided.') {
-        console.log(gradient(["red", "orange"])("Invalid token"));
-      } else {
-        console.clear();
-        console.error(gradient(["red", "orange"])(`Error logging in: ${error.message}`));
+      if (interaction.commandName === 'list') {
+        await this.handleListCommand(interaction);
       }
     });
+  }
+
+  private async registerCommands(): Promise<void> {
+    const commands = [
+      new SlashCommandBuilder()
+        .setName('list')
+        .setDescription('List Hypixel player stats')
+        .addSubcommand(subcommand =>
+          subcommand
+            .setName('account')
+            .setDescription('Show account stats for a player')
+            .addStringOption(option =>
+              option
+                .setName('username')
+                .setDescription('Minecraft username')
+                .setRequired(true)
+            )
+        )
+    ];
+
+    try {
+      console.log('🔄 Registering application commands...');
+      
+      await this.rest.put(
+        Routes.applicationCommands(process.env.CLIENT_ID!),
+        { body: commands }
+      );
+
+      console.log('✅ Successfully registered application commands.');
+    } catch (error) {
+      console.error('❌ Error registering commands:', error);
+    }
+  }
+
+  private async handleListCommand(interaction: CommandInteraction): Promise<void> {
+    const subcommand = interaction.options.data[0];
+    
+    if (subcommand.name === 'account') {
+      const username = subcommand.options?.[0]?.value as string;
+      
+      await interaction.deferReply();
+
+      try {
+        const playerData = await this.getHypixelPlayer(username);
+        
+        if (!playerData) {
+          await interaction.editReply({
+            content: `❌ Player "${username}" not found or has never joined Hypixel.`
+          });
+          return;
+        }
+
+        const embed = this.createPlayerStatsEmbed(playerData);
+        await interaction.editReply({ embeds: [embed] });
+        
+      } catch (error) {
+        console.error('Error fetching player data:', error);
+        await interaction.editReply({
+          content: '❌ An error occurred while fetching player data. Please try again later.'
+        });
+      }
+    }
+  }
+
+  private async getHypixelPlayer(username: string): Promise<HypixelPlayer | null> {
+    try {
+      // First get UUID from Mojang API
+      const mojangResponse = await axios.get(`https://api.mojang.com/users/profiles/minecraft/${username}`);
+      const uuid = mojangResponse.data.id;
+
+      // Then get Hypixel data
+      const hypixelResponse = await axios.get<HypixelApiResponse>(
+        `https://api.hypixel.net/player?key=${this.hypixelApiKey}&uuid=${uuid}`
+      );
+
+      if (!hypixelResponse.data.success || !hypixelResponse.data.player) {
+        return null;
+      }
+
+      return hypixelResponse.data.player;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private createPlayerStatsEmbed(player: HypixelPlayer): EmbedBuilder {
+    const embed = new EmbedBuilder()
+      .setColor(0x00AE86)
+      .setTitle(`📊 Hypixel Stats for ${player.displayname}`)
+      .setThumbnail(`https://crafatar.com/avatars/${player.uuid}?size=64`)
+      .setFooter({ text: 'Hypixel Network Stats' })
+      .setTimestamp();
+
+    // General Info
+    embed.addFields({
+      name: '🎮 General Info',
+      value: `**Username:** ${player.displayname}\n**UUID:** ${player.uuid.slice(0, 8)}...`,
+      inline: false
+    });
+
+    // SkyBlock Stats
+    if (player.stats?.SkyBlock?.profiles) {
+      const profiles = Object.keys(player.stats.SkyBlock.profiles);
+      const profileCount = profiles.length;
+      
+      embed.addFields({
+        name: '🏝️ SkyBlock',
+        value: `**Profiles:** ${profileCount}\n**Profile Names:** ${profiles.slice(0, 3).join(', ')}${profiles.length > 3 ? '...' : ''}`,
+        inline: true
+      });
+    } else {
+      embed.addFields({
+        name: '🏝️ SkyBlock',
+        value: 'No SkyBlock data found',
+        inline: true
+      });
+    }
+
+    // BedWars Stats
+    if (player.stats?.BedWars) {
+      const bedwars = player.stats.BedWars;
+      const wins = bedwars.wins_bedwars || 0;
+      const losses = bedwars.losses_bedwars || 0;
+      const kills = bedwars.kills_bedwars || 0;
+      const deaths = bedwars.deaths_bedwars || 0;
+      const level = bedwars.Experience ? Math.floor(bedwars.Experience / 487000) + 1 : 1;
+
+      embed.addFields({
+        name: '🛏️ BedWars',
+        value: `**Level:** ${level}\n**Wins:** ${wins}\n**Losses:** ${losses}\n**K/D:** ${deaths > 0 ? (kills/deaths).toFixed(2) : kills}`,
+        inline: true
+      });
+    }
+
+    // SkyWars Stats  
+    if (player.stats?.SkyWars) {
+      const skywars = player.stats.SkyWars;
+      const wins = skywars.wins || 0;
+      const losses = skywars.losses || 0;
+      const kills = skywars.kills || 0;
+
+      embed.addFields({
+        name: '☁️ SkyWars',
+        value: `**Wins:** ${wins}\n**Losses:** ${losses}\n**Kills:** ${kills}`,
+        inline: true
+      });
+    }
+
+    // Duels Stats
+    if (player.stats?.Duels) {
+      const duels = player.stats.Duels;
+      const wins = duels.wins || 0;
+      const losses = duels.losses || 0;
+
+      embed.addFields({
+        name: '⚔️ Duels',
+        value: `**Wins:** ${wins}\n**Losses:** ${losses}`,
+        inline: true
+      });
+    }
+
+    return embed;
+  }
+
+  public async start(): Promise<void> {
+    try {
+      await this.client.login(process.env.DISCORD_BOT_TOKEN);
+    } catch (error) {
+      console.error('❌ Failed to start bot:', error);
+      process.exit(1);
+    }
+  }
 }
-export type Translations = {
-  en: { [key: string]: string };
-  hi: { [key: string]: string };
-};
-// lmao
-export const translations: Translations = {
-  en: {
-    optionPrompt: 'Option (Type "back" to go back): ',
-    menuText: `Warn: The English version does not have complete translations\n1 - Clone everything to an existing server\n2 - Clone everything to a server the cloner will create\n3 - Clone everything to a server the cloner will create and generate a template\n5 - Account information\n6 - Server information by ID\n7 - Official Discord Server\n8 - change language to hindi`,
-    cloneInProgress: '> Cloning in progress...',
-    returnnull: 'No response...',
-    yandn: ' (1 - Yes, 2 - No): ',
-    messagesPerChannel: 'How many messages per channel do you want to clone? (This function is temporarily disabled): ',
-    saveToJson: 'Do you want to save to JSON? (1 - Yes, 2 - No): ',
-    beautifyJson: 'Do you want to beautify the JSON? (1 - Yes, 2 - No): ',
-    ignoreOptions: 'Enter what you want to ignore (e.g., emojis, channels, roles): ',
-    reconfigure: 'Do you want to reconfigure? (1 - Yes, 2 - No, 3 - Back): ',
-    invalidOption: 'This option is not defined',
-    cloneCompleted: '> Cloning completed!',
-    configTime: '> Configuration time: ',
-    error2: 'An error occurred (You can report this error on our discord):\n',
-    undefinedfunc: 'Option not set manually',
-    ServerID: 'Enter the ID of the server you want to clone: ',
-    ServerID2: 'Enter your server ID (Server for which you have an administrator role or ownership): ',
-    clonedChannels: '> Number of cloned channels: ',
-    errorCount: '> Error count during cloning: ',
-    enterServerId: 'Enter the server ID: ',
-    loadInProgress: '> Loading in progress...',
-    loadTime: '> Loading time: ',
-    pressEnter: 'Press "ENTER" to continue...',
-    guildName: 'Server Name: ',
-    guildDescription: 'Server Description: ',
-    memberCount: 'Number of Members: ',
-    channelCount: 'Number of Channels: ',
-    createdDate: 'Created at: ',
-    guildId: 'Server ID: ',
-    iconUrl: 'Server Icon URL: ',
-    splashUrl: 'Server Splash URL: ',
-    discoverySplashUrl: 'Server Discovery Splash URL: ',
-    serverFeatures: 'Server Features: ',
-    emojisCount: 'Number of Emojis: ',
-    awaitenter: 'click "ENTER" to continue...',
-    stickersCount: 'Number of Stickers: ',
-    configcloner: 'Configuring the cloner:',
-    msgcloner: "Clone how many messages per channel? (The clone message function has been disabled for testing)",
-    savejsonconfig: 'Save to Json?',
-    beautifuljson: 'Beautiful Json?',
-    noclone: 'Do not clone',
-    ignoretickets: 'Ignore tickets?',
-    option234: 'Do you want to configure? (1 - Yes, 2 - No, 3 - Back): ',
-    invalidid: "The destination server does not exist or you are not on it, try correcting the ID",
-    initcloner: "» Starting cloning",
-    yes: "Yes",
-    no: "No",
-    cloningmessage: "How many messages do you want to clone per channel? (The message clone function has been disabled for testing): ",
-    savejsoninput: "Do you want to save to JSON? ",
-    noclonerinput: "Enter what you want to ignore (e.g. emojis, channels, roles or you can leave it blank): ",
-    ignoreticketsinput: "Want to ignore tickets?",
-    debugoption: "Do you want to activate debugging?",
-    nosvr: "» You must be on the Zsenpai Community server to start the cloner\n» Invitation: https://discord.gg/kVdJewfNax",
-    rolecreate: '» Role created: ',
-    voicechannelcreate: '» Voice channel created: ',
-    createemoji: 'Emoji created: ',
-    ignoreticketmsg: 'It was ignored because it was possibly a ticket',
-    textchannelcreate: '» Created text channel: ',
-    categorycreate: '» Category created: ',
-    msgfinalcloner: '» Cloning took time: ',
-    configtime: '» Configuration took time: ',
-    channelnumber: '» Number of cloned channels: ',
-    errorcloning: '» Error count during cloning: '
 
-
-  },
-hi: {
-    optionPrompt: 'विकल्प (वापस जाने के लिए "back" टाइप करें): ',
-    yandn: ' (1 - हाँ, 2 - नहीं): ',
-    ServerID: 'उस सर्वर का आईडी दर्ज करें जिसे आप क्लोन करना चाहते हैं: ',
-    undefinedfunc: 'विकल्प मैन्युअल रूप से सेट नहीं किया गया है',
-    returnnull: 'कोई प्रतिक्रिया नहीं मिली...',
-    awaitenter: 'जारी रखने के लिए "ENTER" दबाएं...',
-    ServerID2: 'अपने सर्वर का आईडी दर्ज करें (जिसमें आपके पास एक व्यवस्थापक भूमिका या स्वामित्व हो): ',
-    menuText: `1 - मौजूदा सर्वर पर सब कुछ क्लोन करें\n2 - एक ऐसे सर्वर पर सब कुछ क्लोन करें जिसे क्लोनर बनाएगा\n3 - एक ऐसे सर्वर पर सब कुछ क्लोन करें जिसे क्लोनर बनाएगा और एक टेम्पलेट बनाएगा\n5 - खाता जानकारी\n6 - आईडी द्वारा सर्वर जानकारी\n7 - आधिकारिक डिस्कॉर्ड सर्वर\n8 - अंग्रेजी में बदलें`,
-    cloneInProgress: '> क्लोनिंग प्रगति में है...',
-    messagesPerChannel: 'कितनी संदेश प्रति चैनल क्लोन करना चाहते हैं? (यह सुविधा अस्थायी रूप से अक्षम है): ',
-    saveToJson: 'JSON में सहेजना चाहते हैं? (1 - हाँ, 2 - नहीं): ',
-    beautifyJson: 'क्या आप JSON को सुंदर बनाना चाहते हैं? (1 - हाँ, 2 - नहीं): ',
-    ignoreOptions: 'दर्ज करें जो आप अनदेखा करना चाहते हैं (उदाहरण के लिए, इमोजी, चैनल, भूमिकाएँ): ',
-    reconfigure: 'क्या आप पुनर्कृत्रिम करना चाहते हैं? (1 - हाँ, 2 - नहीं, 3 - वापस): ',
-    invalidOption: 'यह विकल्प परिभाषित नहीं है',
-    cloneCompleted: '> क्लोनिंग पूर्ण हुआ!',
-    configTime: '> कॉन्फ़िगरेशन समय: ',
-    clonedChannels: '> क्लोन किए गए चैनलों की संख्या: ',
-    errorCount: '> क्लोनिंग के दौरान त्रुटि गई गई संख्या: ',
-    enterServerId: 'सर्वर आईडी दर्ज करें: ',
-    loadInProgress: '> लोडिंग प्रगति में है...',
-    loadTime: '> लोडिंग समय: ',
-    pressEnter: '"ENTER" दबाएं जारी रखने के लिए...',
-    guildName: 'सर्वर का नाम: ',
-    guildDescription: 'सर्वर का विवरण: ',
-    memberCount: 'सदस्यों की संख्या: ',
-    error2: 'एक त्रुटि आई (आप इस त्रुटि की सूचना हमारे डिस्कॉर्ड पर सूचित कर सकते हैं):\n',
-    channelCount: 'चैनलों की संख्या: ',
-    createdDate: 'बनाया गया है: ',
-    guildId: 'सर्वर आईडी: ',
-    iconUrl: 'सर्वर आइकन URL: ',
-    splashUrl: 'सर्वर स्प्लैश URL: ',
-    discoverySplashUrl: 'सर्वर डिस्कवरी स्प्लैश URL: ',
-    serverFeatures: 'सर्वर सुविधाएं: ',
-    emojisCount: 'इमोजी की संख्या: ',
-    stickersCount: 'स्टिकर की संख्या: ',
-    configcloner: 'क्लोनर को कॉन्फ़िगर कर रहा है:',
-    msgcloner: "प्रति चैनल कितने संदेश क्लोन करें? (संदेश क्लोन की सुविधा को परीक्षण के लिए अक्षम किया गया है)",
-    savejsonconfig: 'JSON में सहेजना चाहते हैं?',
-    beautifuljson: 'क्या आप JSON को सुंदर बनाना चाहते हैं?',
-    noclone: 'क्लोन नहीं करें',
-    ignoretickets: 'टिकटों को अनदेखा करें?',
-    option234: 'क्या आप कॉन्फ़िगर करना चाहते हैं? (1 - हाँ, 2 - नहीं, 3 - वापस): ',
-    invalidid: "लक्षित सर्वर मौजूद नहीं है या आप उस पर नहीं हैं, कृपया आईडी सुधारें",
-    initcloner: "» क्लोनिंग शुरू हो रही है",
-    yes: "हाँ",
-    no: "नहीं",
-    cloningmessage: "प्रति चैनल कितने संदेश क्लोन करें? (संदेश क्लोन की सुविधा को परीक्षण के लिए अक्षम किया गया है): ",
-    savejsoninput: "JSON में सहेजना चाहते हैं?",
-    noclonerinput: "दर्ज करें जो आप अनदेखा करना चाहते हैं (उदाहरण के लिए, इमोजी, चैनल, भूमिकाएँ या आप इसे खाली छोड़ सकते हैं): ",
-    ignoreticketsinput: "टिकट्स को अनदेखा करना चाहते हैं?",
-    debugoption: "क्या आप डीबगिंग सक्रिय करना चाहते हैं?",
-    nosvr: '» क्लोनर शुरू करने के लिए आपको अनिश्चित समुदाय सर्वर पर होना चाहिए\n» आमंत्रण: https://discord.gg/kVdJewfNax',
-    rolecreate: '» भूमिका बनाई गई: ',
-    voicechannelcreate: '» आवाज चैनल बनाया गया: ',
-    emojicreate: 'इमोजी बनाई गई: ',
-    ignoreticketmsg: 'यह इसलिए अनदेखा किया गया था क्योंकि यह संभावना से एक टिकट था',
-    textchannelcreate: '» टेक्स्ट चैनल बनाया गया: ',
-    categorycreate: '» श्रेणी बनाई गई: ',
-    msgfinalcloner: '» क्लोनिंग का समय लिया गया था: ',
-    configtime: '» कॉन्फ़िगरेशन का समय लिया गया था: ',
-    channelnumber: '» क्लोन किए गए चैनलों की संख्या: ',
-    errorcloning: '» क्लोनिंग के दौरान त्रुटि की संख्या: '
-},
-  };
+// Start the bot
+const bot = new HypixelDiscordBot();
+bot.start();
